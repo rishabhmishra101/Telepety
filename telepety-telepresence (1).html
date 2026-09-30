@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Telepety</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0b0d14; color: #fff; overflow: hidden;
+  }
+  #screen { position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; padding: 20px; text-align: center; }
+
+  .role-pick { display: flex; flex-direction: column; gap: 14px; }
+  button.role { padding: 20px 30px; font-size: 1.1rem; border-radius: 14px; border: none;
+    background: #2a2f45; color: #fff; }
+
+  #idleFace { width: 220px; height: 220px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #2c3454, #10131f);
+    display: flex; align-items: center; justify-content: center; gap: 34px; margin-bottom: 26px; }
+  .eye { width: 34px; height: 34px; border-radius: 50%; background: #6cf; animation: blink 4s infinite; box-shadow: 0 0 18px #6cf; }
+  @keyframes blink { 0%,92%,100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+  #idleLabel { font-size: 1rem; color: #9aa; }
+
+  #ringScreen { display: none; }
+  #ringScreen .avatar { width: 130px; height: 130px; border-radius: 50%; background: #2a2f45;
+    display: flex; align-items: center; justify-content: center; font-size: 3rem; margin-bottom: 18px;
+    animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+  .ring-actions { display: flex; gap: 40px; margin-top: 30px; }
+  .ring-btn { width: 70px; height: 70px; border-radius: 50%; border: none; font-size: 1.6rem; color: #fff; }
+  #answerBtn { background: #1e9e4a; }
+  #declineBtn { background: #b8342f; }
+
+  #callingScreen { display: none; }
+
+  #callScreen { display: none; width: 100%; height: 100%; position: fixed; inset: 0; }
+  video { width: 100%; height: 100%; object-fit: cover; background: #000; }
+  #localVideo { position: fixed; bottom: 90px; right: 14px; width: 110px; height: 150px;
+    border-radius: 12px; border: 2px solid #444; object-fit: cover; z-index: 6; }
+  #endCallBtn { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    width: 60px; height: 60px; border-radius: 50%; background: #b8342f; border: none; color: #fff; font-size: 1.4rem; z-index: 6; }
+
+  .controls { position: fixed; left: 14px; bottom: 90px; z-index: 6;
+    display: grid; grid-template-columns: 58px 58px 58px; grid-template-rows: 58px 58px; gap: 8px; }
+  .controls button { font-size: 1.3rem; border-radius: 12px; border: none; background: rgba(42,47,69,0.85); color: #fff; }
+  #fwd { grid-column: 2; grid-row: 1; }
+  #left { grid-column: 1; grid-row: 2; }
+  #stop { grid-column: 2; grid-row: 2; background: rgba(122,32,32,0.85); }
+  #right { grid-column: 3; grid-row: 2; }
+  #back { grid-column: 2; grid-row: 3; }
+
+  #statusBar { position: fixed; top: 10px; left: 0; right: 0; text-align: center;
+    font-size: 0.8rem; color: #9aa; z-index: 6; }
+  #log { position: fixed; top: 34px; left: 0; right: 0; text-align: center; font-size: 0.85rem; color: #6cf; z-index: 6; }
+</style>
+</head>
+<body>
+<div id="statusBar"></div>
+<div id="log"></div>
+
+<div id="screen">
+  <div id="rolePick" class="role-pick">
+    <p>First-time setup — choose which device this is (only needs doing once):</p>
+    <button class="role" onclick="chooseRole('robot')">Telepety (stays home)</button>
+    <button class="role" onclick="chooseRole('remote')">Caller (phone away from home)</button>
+  </div>
+
+  <div id="idleScreen" style="display:none;">
+    <div id="idleFace"><div class="eye"></div><div class="eye"></div></div>
+    <div id="idleLabel">Telepety is here, waiting</div>
+  </div>
+
+  <div id="ringScreen">
+    <div class="avatar">Call</div>
+    <div>Incoming call…</div>
+    <div class="ring-actions">
+      <button class="ring-btn" id="declineBtn">X</button>
+      <button class="ring-btn" id="answerBtn">OK</button>
+    </div>
+  </div>
+
+  <div id="callingScreen">
+    <div class="avatar">...</div>
+    <div>Calling Telepety…</div>
+  </div>
+</div>
+
+<div id="callScreen">
+  <video id="remoteVideo" autoplay playsinline></video>
+  <video id="localVideo" autoplay playsinline muted></video>
+  <div class="controls" id="controlsWrap" style="display:none;">
+    <button id="fwd">Fwd</button><button id="left">Left</button><button id="stop">Stop</button>
+    <button id="right">Right</button><button id="back">Back</button>
+  </div>
+  <button id="endCallBtn">End</button>
+</div>
+
+<script>
+const ROBOT_ID = "telepety-robot-demo";
+
+let peer, localStream, dataConn, activeCall, wakeLock = null, ringInterval = null, audioCtx = null;
+
+function show(id) {
+  ["rolePick","idleScreen","ringScreen","callingScreen"].forEach(s =>
+    document.getElementById(s).style.display = (s === id ? "flex" : "none"));
+  document.getElementById("callScreen").style.display = (id === "call") ? "block" : "none";
+}
+function setStatus(t) { document.getElementById("statusBar").textContent = t; }
+function log(t) { document.getElementById("log").textContent = t; }
+
+async function keepScreenAwake() {
+  try { if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen"); }
+  catch (e) { console.warn(e); }
+}
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState === "visible") await keepScreenAwake();
+});
+
+async function getCamera() {
+  return navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+}
+
+function startRingTone() {
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  function beep() {
+    const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+    osc.frequency.value = 880; osc.connect(gain); gain.connect(audioCtx.destination);
+    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    osc.start(); osc.stop(audioCtx.currentTime + 0.4);
+  }
+  beep();
+  ringInterval = setInterval(beep, 1500);
+  if (navigator.vibrate) navigator.vibrate([400,200,400,200,400]);
+}
+function stopRingTone() {
+  if (ringInterval) clearInterval(ringInterval);
+  if (audioCtx) audioCtx.close();
+  if (navigator.vibrate) navigator.vibrate(0);
+}
+
+function chooseRole(role) {
+  localStorage.setItem("telepetyRole", role);
+  init(role);
+}
+
+async function init(role) {
+  if (role === "robot") await initRobot();
+  else await initRemote();
+}
+
+// ---------------- ROBOT SIDE ----------------
+async function initRobot() {
+  show("idleScreen");
+  await keepScreenAwake();
+  setStatus("Getting ready…");
+  try { localStream = await getCamera(); } catch (e) { setStatus("Camera/mic permission needed."); return; }
+  peer = new Peer(ROBOT_ID);
+
+  peer.on("open", () => setStatus("Telepety is online and waiting"));
+  peer.on("error", (err) => setStatus("Error: " + err.type));
+
+  peer.on("call", (call) => {
+    activeCall = call;
+    show("ringScreen");
+    startRingTone();
+  });
+
+  document.getElementById("answerBtn").onclick = () => {
+    stopRingTone();
+    activeCall.answer(localStream);
+    activeCall.on("stream", (remoteStream) => {
+      document.getElementById("remoteVideo").srcObject = remoteStream;
+      document.getElementById("localVideo").srcObject = localStream;
+      show("call");
+      setStatus("Live");
+    });
+    activeCall.on("close", endedCall);
+  };
+  document.getElementById("declineBtn").onclick = () => {
+    stopRingTone();
+    activeCall.close();
+    show("idleScreen");
+  };
+  document.getElementById("endCallBtn").onclick = () => { activeCall.close(); endedCall(); };
+
+  peer.on("connection", (conn) => {
+    dataConn = conn;
+    dataConn.on("data", (data) => log("Command: " + data.cmd));
+  });
+
+  function endedCall() { show("idleScreen"); setStatus("Telepety is online and waiting"); log(""); }
+}
+
+// ---------------- REMOTE / CALLER SIDE ----------------
+async function initRemote() {
+  show("idleScreen");
+  document.getElementById("idleLabel").textContent = "Tap below to call Telepety";
+  document.getElementById("idleFace").outerHTML =
+    '<button class="role" onclick="callTelepety()" style="margin-bottom:20px;">Call Telepety</button>';
+  try { localStream = await getCamera(); } catch (e) { setStatus("Camera/mic permission needed."); }
+  peer = new Peer();
+  peer.on("error", (err) => setStatus("Error: " + err.type));
+}
+
+async function callTelepety() {
+  show("callingScreen");
+  setStatus("Calling…");
+  const call = peer.call(ROBOT_ID, localStream);
+  call.on("stream", (remoteStream) => {
+    document.getElementById("remoteVideo").srcObject = remoteStream;
+    document.getElementById("localVideo").srcObject = localStream;
+    show("call");
+    document.getElementById("controlsWrap").style.display = "grid";
+    setStatus("Live");
+  });
+  call.on("close", () => { show("idleScreen"); document.getElementById("controlsWrap").style.display = "none"; });
+  document.getElementById("endCallBtn").onclick = () => call.close();
+
+  dataConn = peer.connect(ROBOT_ID);
+  function send(cmd) { if (dataConn && dataConn.open) { dataConn.send({ cmd }); log("Sent: " + cmd); } }
+  document.getElementById("fwd").onclick = () => send("forward");
+  document.getElementById("back").onclick = () => send("backward");
+  document.getElementById("left").onclick = () => send("left");
+  document.getElementById("right").onclick = () => send("right");
+  document.getElementById("stop").onclick = () => send("stop");
+}
+
+// ---------------- STARTUP ----------------
+(function start() {
+  const urlRole = new URLSearchParams(window.location.search).get("role");
+  const savedRole = localStorage.getItem("telepetyRole");
+  const role = urlRole || savedRole;
+  if (role) { if (urlRole) localStorage.setItem("telepetyRole", urlRole); init(role); }
+  else show("rolePick");
+})();
+</script>
+</body>
+</html>
